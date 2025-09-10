@@ -1,9 +1,8 @@
-# quiz_cli.py  —— 命令行问答 Demo（双语，默认英文）
+# quiz_cli.py —— 命令行问答 Demo（旧版 Python 兼容版 + 容错）
 # 0 依赖：只用标准库。读取 data/styles.csv，输出到 outputs/ 目录。
 
-import csv, json, datetime, pathlib, argparse
+import csv, json, datetime, pathlib, argparse, sys
 
-# ---------- Messages (EN & CN) ----------
 MSG = {
     "en": {
         "welcome": "Hi! I’m MITAY’s fortune buddy. We’ll ask a few quick questions.",
@@ -24,6 +23,7 @@ MSG = {
         "closing": "Note: This is rules-based inspiration, not professional advice.",
         "saved": "Saved: {j} and {m}",
         "invalid": "Input not recognized, please try again.",
+        "fatal": "Oops, something went wrong. See details above.",
     },
     "cn": {
         "welcome": "嗨！我是 MITAY 的命理小助手。我们会问你几个小问题。",
@@ -44,10 +44,10 @@ MSG = {
         "closing": "提示：以上为规则引擎灵感建议，不构成专业意见。",
         "saved": "已保存：{j} 和 {m}",
         "invalid": "输入无效，请重试。",
+        "fatal": "出错了，上面打印了详细信息。",
     }
 }
 
-# ---------- Very simple rules (can be replaced by real BaZi/Meihua later) ----------
 MONTH_TO_ELEMENT = {
     "1":"earth","2":"wood","3":"wood","4":"earth","5":"fire","6":"fire",
     "7":"earth","8":"metal","9":"metal","10":"earth","11":"water","12":"water"
@@ -61,136 +61,161 @@ GOAL_BIAS = {
     "study":  ["wood","fire"],
     "social": ["earth","metal"],
 }
-# Meihua (toy): last digit -> trigram -> element
 MEIHUA_LASTDIGIT_TO_ELEMENT = {0:"water",1:"metal",2:"metal",3:"fire",4:"wood",5:"wood",6:"water",7:"earth",8:"earth",9:"metal"}
 
-# ---------- Core helpers ----------
+def safe_input(prompt):
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+    except KeyboardInterrupt:
+        print("\nBye."); sys.exit(0)
+
 def load_styles(path="data/styles.csv"):
     rows=[]
     with open(path,"r",encoding="utf-8") as f:
         for r in csv.DictReader(f):
-            rows.append(r)
+            row = {k: ("" if r[k] is None else str(r[k])) for k in r}
+            rows.append(row)
     return rows
 
-def month_element(ym: str) -> str:
+def month_element(ym):
     try:
-        m = int(ym.split("-")[-1])
+        token = str(ym).strip()
+        if "-" in token:
+            m = int(token.split("-")[-1])
+        elif "/" in token:
+            m = int(token.split("/")[-1])
+        else:
+            m = int(token)
         return MONTH_TO_ELEMENT.get(str(m), "earth")
     except Exception:
         return "earth"
 
-def favored_elements(goal: str, month_elem: str, extra: str | None = None):
+def favored_elements(goal, month_elem_str, extra_elem=None):
     base = GOAL_BIAS.get(goal, ["fire","metal"])
-    seq = base + [month_elem]
-    if extra:
-        seq = [extra] + seq
-    seen=set(); out=[]
+    seq = list(base) + [month_elem_str]
+    if extra_elem:
+        seq = [extra_elem] + seq
+    out, seen = [], set()
     for e in seq:
-        if e not in seen:
+        e = "" if e is None else str(e)
+        if e and e not in seen:
             out.append(e); seen.add(e)
-    return out
+    return out or ["earth"]
 
-def meihua_element_from_nums(nums: list[int]) -> str:
-    if not nums:
+def meihua_element_from_nums(nums):
+    try:
+        if not nums:
+            return None
+        last = int(str(nums[-1])[-1])
+        return MEIHUA_LASTDIGIT_TO_ELEMENT.get(last, "earth")
+    except Exception:
         return None
-    last = int(str(nums[-1])[-1])
-    return MEIHUA_LASTDIGIT_TO_ELEMENT.get(last, "earth")
 
 def pick_styles(favored, styles, k=3):
-    bag=[s for s in styles if s.get("element") in favored]
+    try:
+        bag=[s for s in styles if (s.get("element") or "") in favored]
+    except Exception:
+        bag=[]
     if len(bag)<k:
         for s in styles:
             if s not in bag: bag.append(s)
     return bag[:k]
 
 def render_md(lang, name, ym, month_elem_str, goal, favored, picks):
-    m = MSG[lang]
+    m = MSG.get(lang, MSG["en"])
     lines=[]
-    lines.append(f"**Chatbot:** {m['result_title']}")
-    lines.append(f"- " + m["month_elem"].format(e=month_elem_str))
-    lines.append(f"- " + m["goal_line"].format(g=goal, fav=", ".join(favored)))
-    lines.append(f"**Chatbot:** {m['picks_title']}")
+    lines.append("**Chatbot:** " + m['result_title'])
+    lines.append("- " + m["month_elem"].format(e=str(month_elem_str)))
+    lines.append("- " + m["goal_line"].format(g=str(goal), fav=", ".join([str(x) for x in favored])))
+    lines.append("**Chatbot:** " + m['picks_title'])
     for i,s in enumerate(picks,1):
-        price = f" £{s['price']}" if s.get("price") else ""
-        lines.append(f"{i}. **{s['name']}**{price} — {s['copy']} _(element: {s['element']})_")
-    lines.append(f"**Chatbot:** {m['cta']}")
-    lines.append(f"**Chatbot:** {m['closing']}")
+        price_val = s.get("price") or ""
+        price = f" £{price_val}" if str(price_val).strip() else ""
+        name_val = s.get("name") or "Unknown"
+        copy_val = s.get("copy") or ""
+        elem_val = s.get("element") or ""
+        lines.append(f"{i}. **{name_val}**{price} — {copy_val} _(element: {elem_val})_")
+    lines.append("**Chatbot:** " + m['cta'])
+    lines.append("**Chatbot:** " + m['closing'])
     return "\n".join(lines)
 
-# ---------- CLI flow ----------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--lang", default="en", choices=["en","cn"], help="default en")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lang", default="en", choices=["en","cn"])
+    args = parser.parse_args()
     lang = args.lang
-
     m = MSG[lang]
-    print(m["welcome"])
 
-    # language switch at runtime (optional)
-    raw = input(m["choose_lang"]).strip().lower()
-    if raw in ("en","cn"):
-        lang = raw
+    print(m["welcome"])
+    choose = safe_input(m["choose_lang"]).strip().lower()
+    if choose in ("en","cn"):
+        lang = choose
         m = MSG[lang]
 
-    name = input(m["name"]).strip() or "friend"
+    name = (safe_input(m["name"]).strip() or "friend")
 
-    mode = None
+    mode = ""
     while mode not in ("1","2"):
-        mode = input(m["mode"] + " ").strip()
+        mode = safe_input(m["mode"] + " ").strip()
         if mode not in ("1","2"):
             print(m["invalid"])
 
     dob, btime, nums = None, None, []
     if mode == "1":
-        dob = input(m["dob"]).strip()
-        btime = input(m["time"]).strip() or None
+        dob = safe_input(m["dob"]).strip()
+        btime_raw = safe_input(m["time"]).strip()
+        btime = btime_raw if btime_raw else None
     else:
-        nums_str = input(m["nums"]).strip().replace("，",",")
+        nums_raw = safe_input(m["nums"]).strip().replace("，",",")
         try:
-            nums = [int(x.strip()) for x in nums_str.split(",") if x.strip()!=""]
+            nums = [int(x.strip()) for x in nums_raw.split(",") if x.strip()!=""]
         except Exception:
             nums = []
 
-    ym = input(m["target"]).strip() or "2025-09"
+    ym = safe_input(m["target"]).strip() or "2025-09"
 
-    goal = None
     valid_goals = {"career","wealth","health","emotion","love","study","social"}
+    goal = ""
     while goal not in valid_goals:
-        goal = input(m["goal"] + " ").strip().lower()
+        goal = safe_input(m["goal"] + " ").strip().lower()
         if goal not in valid_goals:
             print(m["invalid"])
 
     print(m["confirm"])
 
-    styles = load_styles("data/styles.csv")
-    month_elem_str = month_element(ym)
-    extra_elem = meihua_element_from_nums(nums) if nums else None  # if meihua chosen, include as extra bias
-    favored = favored_elements(goal, month_elem_str, extra=extra_elem)
-    picks = pick_styles(favored, styles, k=3)
+    try:
+        styles = load_styles("data/styles.csv")
+        month_elem_str = month_element(ym)
+        extra_elem = meihua_element_from_nums(nums) if nums else None
+        favored = favored_elements(goal, month_elem_str, extra_elem)
+        picks = pick_styles(favored, styles, k=3)
 
-    # assemble result
-    out = {
-        "name": name,
-        "method": "birthdate" if mode=="1" else "meihua",
-        "dob": dob, "birth_time": btime, "nums": nums,
-        "target_month": ym,
-        "goal": goal,
-        "month_element": month_elem_str,
-        "elements_considered": favored,
-        "picks": picks,
-        "generated_at": datetime.datetime.utcnow().isoformat()+"Z"
-    }
+        out = {
+            "name": name,
+            "method": "birthdate" if mode=="1" else "meihua",
+            "dob": dob, "birth_time": btime, "nums": nums,
+            "target_month": ym,
+            "goal": goal,
+            "month_element": month_elem_str,
+            "elements_considered": favored,
+            "picks": picks,
+            "generated_at": datetime.datetime.utcnow().isoformat()+"Z"
+        }
 
-    # save
-    outdir = pathlib.Path("outputs"); outdir.mkdir(parents=True, exist_ok=True)
-    stem = f"session_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-    jpath = outdir / f"{stem}.json"
-    mpath = outdir / f"{stem}.md"
-    jpath.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    mpath.write_text(render_md(lang, name, ym, month_elem_str, goal, favored, picks), encoding="utf-8")
+        outdir = pathlib.Path("outputs"); outdir.mkdir(parents=True, exist_ok=True)
+        stem = "session_" + datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        jpath = outdir / (stem + ".json")
+        mpath = outdir / (stem + ".md")
+        jpath.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        mpath.write_text(render_md(lang, name, ym, month_elem_str, goal, favored, picks), encoding="utf-8")
 
-    print(m["saved"].format(j=str(jpath), m=str(mpath)))
+        print(m["saved"].format(j=str(jpath), m=str(mpath)))
+    except Exception as e:
+        print("ERROR:", e)
+        print(m["fatal"])
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
